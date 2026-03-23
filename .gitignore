@@ -1,0 +1,44 @@
+# Compiled binaries
+racecar
+racecar-local
+sentinel/sentinel
+
+# Object files
+*.o
+
+# Go build cache
+*.exe
+*.test
+*.out
+
+# Daytona / secrets
+.env
+.env.*
+*.key
+*.pem
+*.token
+
+# Local state (contains sandbox IDs, not secrets, but machine-specific)
+state.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Racecar data directory (should never be in repo)
+.racecar/
+
+# Temporary files
+/tmp/
+*.tmp
+*.jsonl
+
+# Claude Code
+.claude/
