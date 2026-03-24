@@ -1,0 +1,21 @@
+CC      = gcc
+CFLAGS  = -O3 -Wall -Wextra -std=c11 -ffast-math
+LDFLAGS = -lm
+
+SRC = src/main.c src/db.c src/table.c src/vector.c src/hnsw.c \
+      src/json.c src/tokenizer.c src/util.c
+OBJ = $(SRC:.c=.o)
+BIN = racecar
+
+.PHONY: all clean
+
+all: $(BIN)
+
+$(BIN): $(OBJ)
+	$(CC) $(CFLAGS) -o $@ $^ $(LDFLAGS)
+
+src/%.o: src/%.c src/racecar.h
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+clean:
+	rm -f $(OBJ) $(BIN)

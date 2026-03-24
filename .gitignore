@@ -12,8 +12,7 @@ sentinel/sentinel
 *.out
 
 # Daytona / secrets
-.env
-.env.*
+.env*
 *.key
 *.pem
 *.token
@@ -39,6 +38,9 @@ Thumbs.db
 /tmp/
 *.tmp
 *.jsonl
+
+# Logs
+*.log
 
 # Claude Code
 .claude/

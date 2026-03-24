@@ -67,6 +67,8 @@ racecar init
 
 This loads 196 sample training emails (61 safe, 57 spam, 78 attack) into the 3 sandboxes and builds HNSW indexes for fast search.
 
+> **Note:** Training data is stored on each sandbox's local filesystem, which is ephemeral. If sandboxes are recreated (e.g., after `racecar down && racecar up`), you must run `racecar init` again to reload the data.
+
 ### 6. Classify emails
 
 Classify by subject and body:
@@ -160,15 +162,16 @@ racecar stats
 racecar down
 ```
 
-This destroys the sandboxes but preserves the volume. Next time you run `racecar up`, your training data is still there.
+This destroys the sandboxes. Since data is stored on each sandbox's local filesystem (ephemeral), you will need to run `racecar init` again after `racecar up` to reload training data.
 
 ## All Commands
 
 ```
 Sandbox Management:
   up                                       Spin up 3 sandboxes
-  down                                     Tear down sandboxes (data persists)
+  down                                     Tear down sandboxes (data is ephemeral)
   status                                   Show sandbox states and record counts
+  diag                                     Run diagnostics on all sandboxes
 
 Email Classification:
   init                                     Load sample training data + build indexes
@@ -213,6 +216,18 @@ Runs automatically when Stage 1 flags an email as ATTACK. For raw emails with he
 - **Malware indicator detection** (attachment/macro language)
 - **Attack sub-classification**: PHISHING, CEO_FRAUD, MALWARE, CREDENTIAL_HARVEST
 
+## Agent-Assisted Data Generation
+
+Use Claude Code as an agent to generate synthetic training data:
+
+1. Ask Claude Code to generate emails: "Generate 30 sophisticated phishing emails with varied techniques"
+2. Claude Code writes them to a JSONL file
+3. Run: `racecar populate synthetic.jsonl`
+4. Run: `racecar build-index`
+5. Run: `racecar evaluate`
+
+See CLAUDE.md for detailed agent workflow instructions.
+
 ## Agent Workflow (Self-Improving Loop)
 
 Use Claude Code (or any LLM agent) to generate synthetic training data and improve classification accuracy:
@@ -245,19 +260,24 @@ Repeat steps 2-5 until accuracy reaches target. See CLAUDE.md for detailed agent
   (Go binary)       │  Sandbox 1: SAFE emails       │
        │            │    racecar C binary            │
        │  parallel  │    HNSW index + vector table   │
-       ├──────────► │                               │
+       ├──────────► │    (local filesystem)          │
+       │            │                               │
        │            │  Sandbox 2: SPAM emails        │
        ├──────────► │    racecar C binary            │
        │            │    HNSW index + vector table   │
+       │            │    (local filesystem)          │
        │            │                               │
        ├──────────► │  Sandbox 3: ATTACK emails      │
        │            │    racecar C binary            │
                     │    HNSW index + vector table   │
+                    │    (local filesystem)          │
                     │                               │
                     │  Volume: racecar-data          │
-                    │    (persistent storage)        │
+                    │    (future persistence)        │
                     └───────────────────────────────┘
 ```
+
+Data (vectors, HNSW indexes) is stored on each sandbox's **local filesystem** for performance. Local filesystems are ephemeral — data must be reloaded with `racecar init` after sandboxes are recreated. The volume exists for potential future persistence but is not currently used for data storage.
 
 ## Configuration
 
@@ -314,3 +334,14 @@ make uninstall
 make clean
 rm -rf ~/.racecar
 ```
+
+## Troubleshooting
+
+### `racecar test` shows wrong results after `racecar up`
+Run `racecar init` to reload training data. Sandbox local filesystems are ephemeral — data must be reloaded after `racecar up`.
+
+### Commands return "exit -1"
+This means the Daytona ExecuteCommand timed out. Run `racecar diag` to check sandbox health. If the binary is missing, run `racecar down && racecar up`.
+
+### Sandboxes won't start
+Check your API key: `echo $DAYTONA_API_KEY`. Verify at https://app.daytona.io.

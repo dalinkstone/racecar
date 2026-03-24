@@ -54,6 +54,9 @@ var stopWords = map[string]bool{
 	"and": true, "or": true, "but": true, "not": true, "no": true,
 	"if": true, "then": true, "than": true, "so": true, "very": true,
 	"just": true, "about": true, "up": true, "out": true, "all": true, "also": true,
+	// Structural tokens added by the Go vectorizer (e.g., "subject: ... body: ...")
+	// These appear in every email and must be excluded to avoid false similarity.
+	"subject": true, "body": true,
 }
 
 // ================================================================
@@ -88,12 +91,29 @@ func signHash(s string) int {
 
 // normalizeLeet converts common leet speak substitutions to their
 // alphabetic equivalents (e.g., "acc0unt" -> "account", "p@ssw0rd" -> "password").
+// It operates per-word to avoid corrupting pure numbers (e.g., "45000" should
+// not become "asooo").
 func normalizeLeet(s string) string {
 	r := strings.NewReplacer(
 		"0", "o", "1", "l", "3", "e", "4", "a", "5", "s",
 		"@", "a", "$", "s", "!", "i",
 	)
-	return r.Replace(s)
+	// Split into words, only normalize words that contain at least one letter
+	// (skip pure numbers like "45000" or "29481")
+	words := strings.Fields(s)
+	for i, w := range words {
+		hasLetter := false
+		for _, c := range w {
+			if unicode.IsLetter(c) {
+				hasLetter = true
+				break
+			}
+		}
+		if hasLetter {
+			words[i] = r.Replace(w)
+		}
+	}
+	return strings.Join(words, " ")
 }
 
 // ================================================================

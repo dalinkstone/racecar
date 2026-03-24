@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -15,6 +16,36 @@ import (
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/daytona"
 	"github.com/daytonaio/daytona/libs/sdk-go/pkg/types"
 )
+
+// execWithRetry runs a command in a sandbox, retrying once on timeout (exit code -1).
+func (e *Engine) execWithRetry(ctx context.Context, sandbox *daytona.Sandbox, cmd string) (*types.ExecuteResponse, error) {
+	start := time.Now()
+	resp, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		truncCmd := cmd
+		if len(truncCmd) > 80 {
+			truncCmd = truncCmd[:80]
+		}
+		log.Printf("[slow-cmd] %.1fs: %s", elapsed.Seconds(), truncCmd)
+	}
+	if err == nil && resp.ExitCode == -1 {
+		// Timeout — retry once after a short pause
+		log.Printf("[retry] command timed out (exit -1), retrying after 1s: %s", cmd[:min(80, len(cmd))])
+		time.Sleep(1 * time.Second)
+		start = time.Now()
+		resp, err = sandbox.Process.ExecuteCommand(ctx, cmd)
+		elapsed = time.Since(start)
+		if elapsed > 5*time.Second {
+			truncCmd := cmd
+			if len(truncCmd) > 80 {
+				truncCmd = truncCmd[:80]
+			}
+			log.Printf("[slow-cmd] %.1fs (retry): %s", elapsed.Seconds(), truncCmd)
+		}
+	}
+	return resp, err
+}
 
 // ================================================================
 // Constants
@@ -27,6 +58,7 @@ const (
 	remoteDataDir = "/home/daytona/data"
 	remoteBin     = "/home/daytona/racecar/racecar"
 	stateFileName = "state.json"
+	activeDataDir = "/tmp/racecar-data" // local filesystem — fast, not FUSE
 )
 
 // Categories are the three email classification buckets.
@@ -44,8 +76,10 @@ var sourceFileList = []string{
 	"src/json.c",
 	"src/tokenizer.c",
 	"src/util.c",
-	"Makefile",
 }
+
+// sandboxMakefile is the C-only Makefile uploaded as "Makefile" to each sandbox
+const sandboxMakefileEmbed = "Makefile.sandbox"
 
 // ================================================================
 // Types
@@ -212,7 +246,12 @@ func NewEngine(ctx context.Context) (*Engine, error) {
 // ConnectEngine — reconnect to existing sandboxes from state file
 // ================================================================
 
-func ConnectEngine(ctx context.Context) (*Engine, error) {
+// ConnectEngine reconnects to existing sandboxes from the state file.
+// If forcePartial is true, partial connectivity is allowed (some sandboxes
+// may be unavailable). By default all sandboxes must be reachable.
+func ConnectEngine(ctx context.Context, forcePartial ...bool) (*Engine, error) {
+	allowPartial := len(forcePartial) > 0 && forcePartial[0]
+
 	state, err := loadState()
 	if err != nil {
 		return nil, fmt.Errorf("no active sandboxes (run 'racecar up' first): %w", err)
@@ -230,12 +269,28 @@ func ConnectEngine(ctx context.Context) (*Engine, error) {
 	}
 
 	// Reconnect to each sandbox
+	var connectErrors []string
 	for cat, id := range state.Sandboxes {
 		sandbox, err := client.Get(ctx, id)
 		if err != nil {
-			return nil, fmt.Errorf("reconnect to sandbox [%s] (%s): %w", cat, id, err)
+			errMsg := fmt.Sprintf("[%s] (%s): %v", cat, id, err)
+			connectErrors = append(connectErrors, errMsg)
+			log.Printf("WARNING: failed to reconnect to sandbox %s", errMsg)
+			continue
 		}
 		eng.sandboxes[cat] = sandbox
+	}
+
+	if len(connectErrors) > 0 {
+		if len(eng.sandboxes) == 0 {
+			return nil, fmt.Errorf("all sandbox connections failed: %s", strings.Join(connectErrors, "; "))
+		}
+		if !allowPartial {
+			return nil, fmt.Errorf("some sandbox connections failed (use --force to continue with partial connectivity): %s",
+				strings.Join(connectErrors, "; "))
+		}
+		log.Printf("WARNING: running with %d/%d sandboxes (failed: %s)",
+			len(eng.sandboxes), len(state.Sandboxes), strings.Join(connectErrors, "; "))
 	}
 
 	return eng, nil
@@ -246,26 +301,52 @@ func ConnectEngine(ctx context.Context) (*Engine, error) {
 // ================================================================
 
 func (e *Engine) setupSandbox(ctx context.Context, sandbox *daytona.Sandbox, category string) error {
-	// Install gcc and make if needed
-	resp, err := sandbox.Process.ExecuteCommand(ctx, "which gcc && which make")
+	// Check if build tools are already available
+	resp, err := sandbox.Process.ExecuteCommand(ctx, "gcc --version")
 	if err != nil {
-		return fmt.Errorf("check build tools: %w", err)
+		return fmt.Errorf("check gcc: %w", err)
 	}
+
 	if resp.ExitCode != 0 {
 		log.Printf("[%s] Installing build tools...", category)
-		resp, err = sandbox.Process.ExecuteCommand(ctx, "apt-get update -qq && apt-get install -y -qq gcc make >/dev/null 2>&1")
-		if err != nil || resp.ExitCode != 0 {
-			return fmt.Errorf("install build tools: exit=%d result=%s", resp.ExitCode, resp.Result)
+
+		// Try apt-get (Debian/Ubuntu) — most common for Daytona sandboxes
+		resp, err = sandbox.Process.ExecuteCommand(ctx, "which apt-get")
+		if err == nil && resp.ExitCode == 0 {
+			resp, err = sandbox.Process.ExecuteCommand(ctx, "apt-get update")
+			if err != nil {
+				return fmt.Errorf("apt-get update: %w", err)
+			}
+			if resp.ExitCode != 0 {
+				log.Printf("[%s] apt-get update output: %s", category, resp.Result)
+				return fmt.Errorf("apt-get update failed (exit %d)", resp.ExitCode)
+			}
+			resp, err = sandbox.Process.ExecuteCommand(ctx, "apt-get install -y gcc make")
+			if err != nil {
+				return fmt.Errorf("apt-get install: %w", err)
+			}
+			if resp.ExitCode != 0 {
+				return fmt.Errorf("apt-get install failed (exit %d): %s", resp.ExitCode, resp.Result)
+			}
+		} else {
+			// Try apk (Alpine)
+			resp, err = sandbox.Process.ExecuteCommand(ctx, "apk add --no-cache gcc musl-dev make")
+			if err != nil || resp.ExitCode != 0 {
+				return fmt.Errorf("cannot install build tools: %s", resp.Result)
+			}
 		}
+		log.Printf("[%s] Build tools installed", category)
+	} else {
+		log.Printf("[%s] Build tools already present", category)
 	}
 
 	// Create directories
-	catDataDir := remoteDataDir + "/" + category
-	resp, err = sandbox.Process.ExecuteCommand(ctx, fmt.Sprintf("mkdir -p %s %s/src", remoteSrcDir, remoteSrcDir))
+	catDataDir := activeDataDir + "/" + category
+	resp, err = sandbox.Process.ExecuteCommand(ctx, "mkdir -p "+remoteSrcDir+"/src")
 	if err != nil || resp.ExitCode != 0 {
-		return fmt.Errorf("mkdir: %w", err)
+		return fmt.Errorf("mkdir src: %w", err)
 	}
-	resp, err = sandbox.Process.ExecuteCommand(ctx, "mkdir -p "+catDataDir)
+	resp, err = sandbox.Process.ExecuteCommand(ctx, "mkdir -p "+catDataDir+"/sentinel")
 	if err != nil || resp.ExitCode != 0 {
 		return fmt.Errorf("mkdir data: %w", err)
 	}
@@ -283,25 +364,61 @@ func (e *Engine) setupSandbox(ctx context.Context, sandbox *daytona.Sandbox, cat
 		}
 	}
 
-	// Compile
+	// Upload sandbox-specific Makefile
+	makeContent, err := embeddedFiles.ReadFile(sandboxMakefileEmbed)
+	if err != nil {
+		return fmt.Errorf("read embedded Makefile.sandbox: %w", err)
+	}
+	if err := sandbox.FileSystem.UploadFile(ctx, makeContent, remoteSrcDir+"/Makefile"); err != nil {
+		return fmt.Errorf("upload Makefile: %w", err)
+	}
+
+	// Verify files are in place
+	resp, err = sandbox.Process.ExecuteCommand(ctx, "ls "+remoteSrcDir+"/Makefile "+remoteSrcDir+"/src/racecar.h")
+	if err != nil || resp.ExitCode != 0 {
+		return fmt.Errorf("files not uploaded correctly: %s", resp.Result)
+	}
+	log.Printf("[%s] Files verified: %s", category, resp.Result)
+
+	// Compile — single gcc invocation is faster and avoids make timeout issues
 	log.Printf("[%s] Compiling racecar...", category)
-	resp, err = sandbox.Process.ExecuteCommand(ctx, "cd "+remoteSrcDir+" && make clean && make 2>&1")
+	compileCmd := fmt.Sprintf(
+		"gcc -O2 -Wall -std=gnu11 -o %s/racecar "+
+			"%s/src/main.c %s/src/db.c %s/src/table.c %s/src/vector.c "+
+			"%s/src/hnsw.c %s/src/json.c %s/src/tokenizer.c %s/src/util.c -lm",
+		remoteSrcDir,
+		remoteSrcDir, remoteSrcDir, remoteSrcDir, remoteSrcDir,
+		remoteSrcDir, remoteSrcDir, remoteSrcDir, remoteSrcDir,
+	)
+	// Use a longer timeout context for compilation
+	compileCtx, cancel := context.WithTimeout(ctx, 120*time.Second)
+	defer cancel()
+	resp, err = sandbox.Process.ExecuteCommand(compileCtx, compileCmd)
 	if err != nil {
 		return fmt.Errorf("compile: %w", err)
 	}
 	if resp.ExitCode != 0 {
-		return fmt.Errorf("compilation failed:\n%s", resp.Result)
+		return fmt.Errorf("compilation failed (exit %d):\n%s", resp.ExitCode, resp.Result)
 	}
+	log.Printf("[%s] Compilation successful", category)
+
+	// Verify binary exists
+	resp, err = sandbox.Process.ExecuteCommand(ctx, "ls -la "+remoteSrcDir+"/racecar")
+	if err != nil || resp.ExitCode != 0 {
+		return fmt.Errorf("racecar binary not found after compilation")
+	}
+	log.Printf("[%s] Binary: %s", category, resp.Result)
 
 	// Create the database and table for this category
 	dbName := "sentinel"
 	tableName := "emails_" + category
+	catBin := remoteSrcDir + "/racecar"
 
 	// Create db (ignore "exists" errors)
-	sandbox.Process.ExecuteCommand(ctx, fmt.Sprintf("RACECAR_DATA=%s %s db-create %s", catDataDir, remoteBin, dbName))
+	sandbox.Process.ExecuteCommand(ctx, fmt.Sprintf("%s --data-dir %s db-create %s", catBin, catDataDir, dbName))
 
 	// Create table (ignore "exists" errors) — 256-dim cosine
-	sandbox.Process.ExecuteCommand(ctx, fmt.Sprintf("RACECAR_DATA=%s %s table-create %s %s 256 cosine", catDataDir, remoteBin, dbName, tableName))
+	sandbox.Process.ExecuteCommand(ctx, fmt.Sprintf("%s --data-dir %s table-create %s %s 256 cosine", catBin, catDataDir, dbName, tableName))
 
 	log.Printf("[%s] Ready", category)
 	return nil
@@ -317,9 +434,16 @@ func (e *Engine) Exec(ctx context.Context, category string, args string) (string
 	if !ok {
 		return "", fmt.Errorf("unknown category: %s", category)
 	}
-	catDataDir := remoteDataDir + "/" + category
-	cmd := fmt.Sprintf("RACECAR_DATA=%s %s %s", catDataDir, remoteBin, args)
-	resp, err := sandbox.Process.ExecuteCommand(ctx, cmd)
+	catDataDir := activeDataDir + "/" + category
+	cmd := fmt.Sprintf("%s --data-dir %s %s", remoteBin, catDataDir, args)
+
+	start := time.Now()
+	resp, err := e.execWithRetry(ctx, sandbox, cmd)
+	elapsed := time.Since(start)
+	if elapsed > 5*time.Second {
+		log.Printf("[%s] Slow command (%.1fs): %s", category, elapsed.Seconds(), args[:min(80, len(args))])
+	}
+
 	if err != nil {
 		return "", fmt.Errorf("exec in [%s]: %w", category, err)
 	}
@@ -331,35 +455,138 @@ func (e *Engine) Exec(ctx context.Context, category string, args string) (string
 
 // Insert vectorizes text and inserts into the specified category's sandbox.
 func (e *Engine) Insert(ctx context.Context, category string, subject, body string) (string, error) {
-	combined := fmt.Sprintf("subject: %s body: %s", subject, body)
-	vec := vectorize(combined)
-	vecStr := formatVector(vec)
+	return e.BatchInsert(ctx, category, []struct{ Subject, Body string }{{subject, body}})
+}
 
-	meta := fmt.Sprintf(`{"subject":"%s"}`, escapeJSON(subject))
-	args := fmt.Sprintf(`insert sentinel emails_%s "%s" '%s'`, category, vecStr, meta)
+// BatchInsert vectorizes multiple emails and writes the .rct binary file directly.
+// This bypasses ExecuteCommand entirely for data loading — no timeout issues.
+func (e *Engine) BatchInsert(ctx context.Context, category string, emails []struct{ Subject, Body string }) (string, error) {
+	sandbox, ok := e.sandboxes[category]
+	if !ok {
+		return "", fmt.Errorf("unknown category: %s", category)
+	}
 
-	return e.Exec(ctx, category, args)
+	const (
+		magic      = 0x52435242
+		version    = 1
+		dimensions = 256
+		metric     = 0 // cosine
+		metaSize   = 1024
+		headerSize = 64
+		recordSize = 16 + dimensions*4 + metaSize // 2064 bytes
+	)
+
+	count := uint64(len(emails))
+	capacity := count
+	if capacity < 1024 {
+		capacity = 1024
+	}
+
+	// Build binary .rct file in memory
+	fileSize := headerSize + int(count)*recordSize
+	data := make([]byte, fileSize)
+
+	// Write header (64 bytes, little-endian)
+	le := func(b []byte, v uint32) { b[0] = byte(v); b[1] = byte(v >> 8); b[2] = byte(v >> 16); b[3] = byte(v >> 24) }
+	le64 := func(b []byte, v uint64) {
+		b[0] = byte(v); b[1] = byte(v >> 8); b[2] = byte(v >> 16); b[3] = byte(v >> 24)
+		b[4] = byte(v >> 32); b[5] = byte(v >> 40); b[6] = byte(v >> 48); b[7] = byte(v >> 56)
+	}
+
+	le(data[0:4], magic)
+	le(data[4:8], version)
+	le(data[8:12], dimensions)
+	le(data[12:16], metric)
+	le(data[16:20], metaSize)
+	le(data[20:24], 0) // pad
+	le64(data[24:32], count)
+	le64(data[32:40], count+1) // next_id
+	le64(data[40:48], capacity)
+	// bytes 48-63: reserved (already zeroed)
+
+	// Write records
+	for i, email := range emails {
+		combined := fmt.Sprintf("subject: %s body: %s", email.Subject, email.Body)
+		vec := vectorize(combined)
+
+		meta := fmt.Sprintf(`{"subject":"%s"}`, escapeJSON(email.Subject))
+		if len(meta) >= metaSize {
+			meta = meta[:metaSize-1]
+		}
+
+		offset := headerSize + i*recordSize
+		rec := data[offset : offset+recordSize]
+
+		// id (uint64)
+		le64(rec[0:8], uint64(i+1))
+		// flags (uint32) — RC_RECORD_ACTIVE = 0x01
+		le(rec[8:12], 1)
+		// meta_len (uint32)
+		le(rec[12:16], uint32(len(meta)))
+		// vector (256 floats, little-endian)
+		for j, v := range vec {
+			bits := math.Float32bits(v)
+			off := 16 + j*4
+			le(rec[off:off+4], bits)
+		}
+		// metadata (null-terminated string in metaSize bytes)
+		copy(rec[16+dimensions*4:], []byte(meta))
+	}
+
+	// Upload the .rct file directly to the sandbox
+	catDataDir := activeDataDir + "/" + category
+	dbDir := catDataDir + "/sentinel"
+	tablePath := dbDir + "/emails_" + category + ".rct"
+
+	// Ensure directory exists
+	sandbox.Process.ExecuteCommand(ctx, "mkdir -p "+dbDir)
+
+	if err := sandbox.FileSystem.UploadFile(ctx, data, tablePath); err != nil {
+		return "", fmt.Errorf("upload .rct file: %w", err)
+	}
+
+	return fmt.Sprintf("wrote %d records (%d bytes)", count, len(data)), nil
 }
 
 // SearchCategory searches a single category and returns avg distance + match count.
+// Passes the query vector directly as a command-line argument (256 floats ~ 2.5KB,
+// well within OS limits). Uses --data-dir flag instead of env vars to avoid
+// shell interpretation issues in Daytona's ExecuteCommand.
 func (e *Engine) SearchCategory(ctx context.Context, category string, vecStr string, topK int) (float64, int, error) {
-	args := fmt.Sprintf("search sentinel emails_%s \"%s\" %d", category, vecStr, topK)
-	output, err := e.Exec(ctx, category, args)
-	if err != nil {
-		return 1e30, 0, err
+	sandbox, ok := e.sandboxes[category]
+	if !ok {
+		return 1e30, 0, fmt.Errorf("unknown category: %s", category)
 	}
 
-	return parseSearchOutput(output)
+	catDataDir := activeDataDir + "/" + category
+
+	searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	cmd := fmt.Sprintf("%s --data-dir %s search sentinel emails_%s %s %d",
+		remoteBin, catDataDir, category, vecStr, topK)
+
+	resp, err := e.execWithRetry(searchCtx, sandbox, cmd)
+	if err != nil {
+		return 1e30, 0, fmt.Errorf("search in [%s]: %w", category, err)
+	}
+	if resp.ExitCode != 0 {
+		return 1e30, 0, fmt.Errorf("search failed in [%s] (exit %d): %s", category, resp.ExitCode, resp.Result)
+	}
+
+	return parseSearchOutput(resp.Result)
 }
 
 // ParallelSearch searches all 3 categories concurrently.
 // Returns: category scores (avg distance) and match counts.
+// If some but not all searches fail, returns results with warnings logged.
+// If ALL searches fail, returns an error.
 func (e *Engine) ParallelSearch(ctx context.Context, vecStr string, topK int) ([3]float64, [3]int, error) {
 	var scores [3]float64
 	var counts [3]int
 	var mu sync.Mutex
 	var wg sync.WaitGroup
-	var firstErr error
+	var errs [3]error
 
 	for i, cat := range Categories {
 		wg.Add(1)
@@ -369,9 +596,7 @@ func (e *Engine) ParallelSearch(ctx context.Context, vecStr string, topK int) ([
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				if firstErr == nil {
-					firstErr = err
-				}
+				errs[idx] = err
 				scores[idx] = 1e30
 				counts[idx] = 0
 			} else {
@@ -382,7 +607,35 @@ func (e *Engine) ParallelSearch(ctx context.Context, vecStr string, topK int) ([
 	}
 	wg.Wait()
 
-	return scores, counts, firstErr
+	// Count failures
+	failCount := 0
+	var failedCats []string
+	for i, err := range errs {
+		if err != nil {
+			failCount++
+			failedCats = append(failedCats, Categories[i])
+		}
+	}
+
+	if failCount == 3 {
+		// All searches failed — return a combined error
+		return scores, counts, fmt.Errorf("all searches failed: [safe] %v; [spam] %v; [attack] %v",
+			errs[0], errs[1], errs[2])
+	}
+
+	if failCount > 0 {
+		// Partial failure — log warnings but still return results for the categories that succeeded
+		for i, err := range errs {
+			if err != nil {
+				log.Printf("[WARNING] Search failed for [%s]: %v (using score 1e30, will not be selected as best match)",
+					Categories[i], err)
+			}
+		}
+		return scores, counts, fmt.Errorf("search failed for %d/3 categories (%s); classification based on remaining results",
+			failCount, strings.Join(failedCats, ", "))
+	}
+
+	return scores, counts, nil
 }
 
 // Destroy tears down all sandboxes (volume persists).
@@ -478,7 +731,7 @@ func parseSearchOutput(output string) (float64, int, error) {
 		if line == "" || strings.HasPrefix(line, "Search") || strings.HasPrefix(line, "Rank") {
 			continue
 		}
-		// Parse: "1       42          0.1234"
+		// Parse: "1       42          0.123456"
 		fields := strings.Fields(line)
 		if len(fields) >= 3 {
 			dist, err := strconv.ParseFloat(fields[2], 64)
@@ -533,32 +786,57 @@ func (e *Engine) ClassifyEmail(ctx context.Context, subject, body string) (*Clas
 	vec := vectorize(combined)
 	vecStr := formatVector(vec)
 
-	scores, counts, err := e.ParallelSearch(ctx, vecStr, TopK)
-	if err != nil {
-		return nil, err
-	}
+	scores, counts, searchErr := e.ParallelSearch(ctx, vecStr, TopK)
 
-	// Determine winner
-	best := 0
-	for i := 1; i < 3; i++ {
-		if scores[i] < scores[best] {
-			best = i
+	// If all searches failed, we cannot classify at all
+	allFailed := true
+	for _, s := range scores {
+		if s < 1e30 {
+			allFailed = false
+			break
 		}
 	}
+	if allFailed {
+		return nil, fmt.Errorf("classification failed: %w", searchErr)
+	}
 
-	// Confidence
-	sorted := make([]float64, 3)
-	copy(sorted, scores[:])
-	for i := 0; i < 2; i++ {
-		for j := i + 1; j < 3; j++ {
-			if sorted[j] < sorted[i] {
-				sorted[i], sorted[j] = sorted[j], sorted[i]
+	// If some searches failed, we can still classify using the successful ones.
+	// The failed categories have score 1e30 so they won't be selected as best.
+	if searchErr != nil {
+		log.Printf("[WARNING] Partial search failure during classification: %v", searchErr)
+	}
+
+	// Determine winner (only among categories that succeeded, i.e. score < 1e30)
+	best := -1
+	for i := 0; i < 3; i++ {
+		if scores[i] < 1e30 {
+			if best == -1 || scores[i] < scores[best] {
+				best = i
 			}
 		}
 	}
+
+	// Confidence: only compute among successful categories
+	var validScores []float64
+	for _, s := range scores {
+		if s < 1e30 {
+			validScores = append(validScores, s)
+		}
+	}
+
 	confidence := 0.0
-	if sorted[1] > 0.0001 {
-		confidence = 1.0 - (sorted[0] / sorted[1])
+	if len(validScores) >= 2 {
+		// Sort valid scores to get the two smallest
+		for i := 0; i < len(validScores)-1; i++ {
+			for j := i + 1; j < len(validScores); j++ {
+				if validScores[j] < validScores[i] {
+					validScores[i], validScores[j] = validScores[j], validScores[i]
+				}
+			}
+		}
+		if validScores[1] > 0.0001 {
+			confidence = 1.0 - (validScores[0] / validScores[1])
+		}
 	}
 	if confidence < 0 {
 		confidence = 0

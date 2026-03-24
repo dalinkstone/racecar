@@ -78,6 +78,94 @@ var advancedSafeEmails = []SampleEmail{
 		"Voicemail transcription from +1-555-0142",
 		"Voicemail received at 10:22 AM from +1-555-0142, duration 1 minute 15 seconds. Transcription: Hi, this is Dr. Peterson's office calling to confirm your appointment on Thursday at 3 PM. Please call us back to confirm.",
 	},
+
+	// Casual lunch/dinner plan emails (borderline vocabulary: lunch, tomorrow, etc.)
+	{
+		"Lunch tomorrow?",
+		"Hey, want to grab lunch tomorrow? I was thinking tacos from that new place on 5th. Let me know if you're free around noon.",
+	},
+	{
+		"Pizza for the team tomorrow",
+		"I'm ordering pizza for the team tomorrow to celebrate the release. Any preferences or dietary restrictions? Reply by 4 PM so I can place the order.",
+	},
+	{
+		"Coffee at 3?",
+		"Hey, want to grab coffee at 3? I need a break and wanted to catch up on how things are going with the migration project.",
+	},
+	{
+		"Dinner reservation at 7pm",
+		"I made a dinner reservation for us at 7pm at that Italian place downtown. Party of six. Let me know if anyone else wants to join.",
+	},
+	{
+		"Who's joining for happy hour?",
+		"A few of us are heading to O'Malley's for happy hour after work on Friday. Who's in? First round is on the marketing budget, just kidding.",
+	},
+
+	// Budget and financial SAFE emails (borderline vocabulary: budget, review, attached, quarter)
+	{
+		"Q3 budget review attached",
+		"Hi team, please find the Q3 budget review attached. Overall we came in 3% under budget which is great. Let's discuss the details at Monday's staff meeting.",
+	},
+	{
+		"Expense report approved",
+		"Your expense report for the Denver conference has been approved. The reimbursement of $847.32 will be included in your next paycheck. Thanks for submitting on time.",
+	},
+	{
+		"Annual budget planning session",
+		"Reminder: the annual budget planning session is scheduled for next Tuesday at 10 AM in the large conference room. Please bring your department forecasts.",
+	},
+	{
+		"Revenue up 15% this quarter",
+		"Great news everyone — revenue is up 15% this quarter compared to last year. The sales team really knocked it out of the park. Detailed breakdown attached for review.",
+	},
+	{
+		"Cost analysis for the new project",
+		"I finished the cost analysis for the new project. Total estimated spend is $340K over 18 months. The spreadsheet is attached with itemized breakdowns by category.",
+	},
+
+	// Review and feedback SAFE emails (borderline vocabulary: review, feedback, attached)
+	{
+		"Code review comments on PR #234",
+		"Left a few comments on PR #234. Mostly minor style things. The overall approach looks solid. Let me know when you push the updates and I'll give a final approval.",
+	},
+	{
+		"Performance review scheduled for Friday",
+		"Hi, your performance review is scheduled for Friday at 2 PM in my office. No surprises — just a chance to go over your goals and accomplishments this quarter.",
+	},
+	{
+		"Design review feedback",
+		"Thanks for sharing the mockups. The design review feedback from the team is mostly positive. A few suggestions on the color palette and font sizing are in the attached PDF.",
+	},
+	{
+		"Quarterly review meeting notes",
+		"Attached are the notes from today's quarterly review meeting. Key takeaways: hiring plan approved, office expansion on track, and Q4 targets remain unchanged.",
+	},
+	{
+		"Review: great job on the launch",
+		"Just wanted to say great job on the product launch yesterday. Everything went smoothly and the initial customer feedback has been very positive. Well done, team.",
+	},
+
+	// Short casual emails (common safe patterns)
+	{
+		"Re: Meeting tomorrow",
+		"Sounds good, see you then.",
+	},
+	{
+		"Re: Status update",
+		"Thanks for the update. Everything looks on track.",
+	},
+	{
+		"Re: Can you handle this?",
+		"Got it, will do.",
+	},
+	{
+		"Re: Where are you?",
+		"On my way. Be there in 10.",
+	},
+	{
+		"Re: Stand-up in 5",
+		"Running 5 minutes late. Start without me and I'll catch up.",
+	},
 }
 
 // advancedSpamEmails contains unsolicited marketing emails that use urgency
@@ -265,5 +353,27 @@ var advancedAttackEmails = []SampleEmail{
 	{
 		"Scanned image from HP printer",
 		"You have received a scanned image from device HP-LaserJet-4200 in the third floor copy room. Please see the attached file. Note: you may need to enable content to view the scan properly.",
+	},
+
+	// Attacks using "review" and "attached" vocabulary (counterbalance for safe emails)
+	{
+		"Review the attached document to verify charges",
+		"Unusual charges have been detected on your account. Please review the attached document to verify the transactions. Open the file and confirm your identity to dispute any unauthorized charges.",
+	},
+	{
+		"Attached: Court summons notification",
+		"You have been issued a court summons. The details are in the attached document. Please review immediately and respond within 48 hours or a default judgment may be entered against you.",
+	},
+	{
+		"Review required: Suspicious account activity",
+		"Our fraud team has flagged suspicious activity on your account. Immediate review is required. Click below to verify recent transactions and confirm your identity to avoid account suspension.",
+	},
+	{
+		"Attached invoice requires your immediate review",
+		"The attached invoice shows a discrepancy in your recent payment. Please review and verify your banking details to process the correction. Failure to respond within 24 hours will result in a late fee.",
+	},
+	{
+		"Urgent review: Attached security audit findings",
+		"A mandatory security audit has revealed vulnerabilities in your account. Please review the attached findings and re-authenticate your credentials at the link below to secure your account immediately.",
 	},
 }

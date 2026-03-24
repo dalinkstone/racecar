@@ -11,6 +11,8 @@ This project is a vector database with email anomaly detection running inside Da
 
 ## Key Commands
 
+> **Note:** Sandbox data is ephemeral. After `racecar up`, you must run `racecar init` to load data. Data is lost when sandboxes are torn down (`racecar down`).
+
 ```bash
 racecar up           # spin up 3 sandboxes
 racecar init         # load built-in training data
@@ -24,10 +26,25 @@ racecar test                        # human-readable accuracy test
 racecar evaluate                    # machine-readable JSON test output
 racecar test-raw                    # test raw emails with headers
 racecar stats                       # show record counts
+racecar diag                        # check sandbox health (binary, table, search)
 racecar down                        # tear down sandboxes
 ```
 
-## Agent Workflow: Generating Synthetic Training Data
+## Agent Workflow
+
+### Full Start-to-Finish Workflow
+
+1. Build: `make`
+2. Start sandboxes: `racecar up`
+3. Load training data: `racecar init`
+4. Verify health: `racecar diag`
+5. Test accuracy: `racecar test`
+6. Generate synthetic data (optional)
+7. Populate: `racecar populate synthetic.jsonl`
+8. Re-test: `racecar evaluate`
+9. Tear down when done: `racecar down`
+
+### Generating Synthetic Training Data
 
 When asked to populate the database with synthetic emails, follow this workflow:
 
@@ -120,6 +137,28 @@ For a full self-improving cycle, repeat steps 2-6 until accuracy is satisfactory
 
 Stop when accuracy reaches the target or no further improvement is possible.
 
+### Raw Email Format
+
+Raw emails for `racecar classify-raw` use standard email format:
+
+```
+From: "Sender Name" <sender@example.com>
+To: recipient@example.com
+Subject: Email Subject Here
+Date: Mon, 23 Mar 2026 10:00:00 -0500
+Authentication-Results: mx.example.com;
+    spf=pass smtp.mailfrom=example.com;
+    dkim=pass header.d=example.com
+
+Email body text here. This is where the actual message goes.
+Multiple paragraphs are fine.
+```
+
+Headers and body are separated by a blank line. Key headers for Stage 2 analysis:
+- From / Reply-To / Return-Path (domain mismatch detection)
+- Authentication-Results (SPF/DKIM/DMARC analysis)
+- X-Mailer (suspicious mailer detection)
+
 ## JSONL Format Reference
 
 ```json
@@ -133,6 +172,13 @@ Stop when accuracy reaches the target or no further improvement is possible.
 - One JSON object per line, no trailing commas
 - Lines starting with `#` are ignored
 - Empty lines are ignored
+
+## Common Issues
+
+- "No active sandboxes": Run `racecar up` first
+- "exit -1" errors: ExecuteCommand timeout — run `racecar diag` to check
+- Wrong classifications after `racecar up`: Run `racecar init` to reload data
+- Stale state: `rm ~/.racecar/state.json` then `racecar up`
 
 ## Architecture Notes
 

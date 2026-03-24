@@ -333,7 +333,7 @@ static void print_results(const rc_result_t *results, uint32_t count, double ela
     printf("Search completed in %.3f ms\n\n", elapsed_ms);
     printf("%-6s  %-10s  %s\n", "Rank", "ID", "Distance");
     for (uint32_t i = 0; i < count; i++) {
-        printf("%-6u  %-10lu  %.4f\n",
+        printf("%-6u  %-10lu  %.6f\n",
                i + 1, (unsigned long)results[i].id, results[i].distance);
     }
     if (count == 0) printf("No results.\n");
@@ -853,6 +853,17 @@ static int cmd_bench(int argc, char **argv)
 
 int main(int argc, char **argv)
 {
+    /* Handle --data-dir flag: sets RACECAR_DATA env var from command line.
+     * This avoids reliance on shell "VAR=value cmd" syntax which may not
+     * work in all execution environments (e.g., Daytona ExecuteCommand). */
+    if (argc >= 3 && strcmp(argv[1], "--data-dir") == 0) {
+        setenv("RACECAR_DATA", argv[2], 1);
+        /* Shift arguments so command dispatch sees the right indices */
+        for (int i = 3; i < argc; i++)
+            argv[i - 2] = argv[i];
+        argc -= 2;
+    }
+
     if (argc < 2) {
         print_help();
         return 1;
